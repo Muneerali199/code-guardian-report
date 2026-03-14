@@ -211,6 +211,12 @@ export class EnhancedAnalysisEngine {
           // Dependency scanning is optional - continue without it
           dependencyAnalysis = undefined;
         }
+
+        // Deduplicate: multiple analysis passes (pattern, AST, data-flow,
+        // modern scanning) can report the same issue for the same location.
+        // Keep the highest-confidence occurrence when two issues share the
+        // same (filename, line, column, type).
+        allIssues = this.deduplicateIssues(allIssues);
       } catch (error) {
         logger.error("Error during codebase analysis:", error);
         // Return error-based analysis for failed ZIP processing
@@ -294,6 +300,61 @@ export class EnhancedAnalysisEngine {
         `${malformedIssues.length} issues have missing required fields (severity, message, or filename)`
       );
     }
+  }
+
+  /**
+   * Remove duplicate issues that arise from running multiple analysis passes
+   * (pattern-based, AST, data-flow, modern scanning) over the same file.
+   *
+   * Two issues are considered duplicates when they share the same:
+   *   filename + line + type/category
+   *
+   * Column is intentionally excluded from the key because different passes
+   * may report slightly different column offsets for the same logical issue.
+   * When duplicates are found, the one with the highest confidence score is kept.
+   */
+  private deduplicateIssues(issues: SecurityIssue[]): SecurityIssue[] {
+    const seen = new Map<string, SecurityIssue>();
+
+    for (const issue of issues) {
+      // Normalise the type/category string so minor naming differences don't
+      // prevent deduplication (e.g. "Code Injection" vs "code-injection")
+      const normalised = (s: string) =>
+        s.toLowerCase().replace(/[\s_-]+/g, "");
+
+      const key = [
+        issue.filename,
+        issue.line,
+        normalised(issue.type ?? issue.category ?? ""),
+      ].join("::");
+
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, issue);
+      } else {
+        // Keep the occurrence with higher confidence; prefer the one with a
+        // populated codeSnippet as a tiebreaker.
+        const existingConf = existing.confidence ?? 0;
+        const currentConf = issue.confidence ?? 0;
+        if (
+          currentConf > existingConf ||
+          (currentConf === existingConf &&
+            issue.codeSnippet &&
+            !existing.codeSnippet)
+        ) {
+          seen.set(key, issue);
+        }
+      }
+    }
+
+    const deduplicated = Array.from(seen.values());
+    const removed = issues.length - deduplicated.length;
+    if (removed > 0) {
+      logger.debug(
+        `Deduplication removed ${removed} duplicate issues (${issues.length} → ${deduplicated.length})`
+      );
+    }
+    return deduplicated;
   }
 }
 

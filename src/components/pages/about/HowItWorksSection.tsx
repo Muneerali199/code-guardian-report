@@ -13,6 +13,7 @@ import {
   Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { APP_VERSION_WITH_PREFIX } from "@/utils/version";
 
 interface AnalysisNode {
   id: string;
@@ -308,9 +309,7 @@ export const HowItWorksSection: React.FC = () => {
                               <div className="bg-background border-border flex gap-2 border px-2 py-1">
                                 <GitBranch className="text-muted-foreground h-3 w-3" />
                                 <span className="text-muted-foreground font-mono text-[10px] uppercase">
-                                  v
-                                  {process.env.NEXT_PUBLIC_APP_VERSION ||
-                                    "2.0.0"}
+                                  {APP_VERSION_WITH_PREFIX}
                                 </span>
                               </div>
                             </div>

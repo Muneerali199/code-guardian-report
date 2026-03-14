@@ -172,7 +172,7 @@ const nextConfig: NextConfig = {
 
   // Environment variables to expose to the browser
   env: {
-    NEXT_PUBLIC_APP_VERSION: process.env.npm_package_version || "11.0.0",
+    NEXT_PUBLIC_APP_VERSION: process.env.npm_package_version || process.env.NEXT_PUBLIC_APP_VERSION || "15.0.0",
     NEXT_PUBLIC_BUILD_TIME: new Date().toISOString(),
   },
 
@@ -216,11 +216,33 @@ const nextConfig: NextConfig = {
             key: "X-Permitted-Cross-Domain-Policies",
             value: "none",
           },
-          // Content Security Policy - Allow GitHub API access
+          // Content Security Policy
+          // - script-src: removed 'unsafe-inline' and 'unsafe-eval'.
+          //   Next.js inlines a small bootstrap script; we allow it via the
+          //   nonce approach in production. In development Turbopack needs
+          //   'unsafe-eval', so we keep it only in non-production builds.
+          // - style-src: 'unsafe-inline' is kept because Tailwind / CSS-in-JS
+          //   injects styles at runtime and nonce-based style CSP is not yet
+          //   supported by all browsers consistently.
           {
             key: "Content-Security-Policy",
-            value:
-              "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://apis.google.com https://vercel.live https://vitals.vercel-insights.com https://va.vercel-scripts.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.github.com https://*.github.com https://raw.githubusercontent.com https://codeload.github.com https://api.openai.com https://api.anthropic.com https://api.groq.com https://generativelanguage.googleapis.com https://fonts.gstatic.com https://*.google.com https://*.firebaseio.com https://*.googleapis.com https://*.firebase.com https://*.google-analytics.com https://vercel.live https://vitals.vercel-insights.com https://va.vercel-insights.com wss://*.firebaseio.com; frame-src 'self' https://vercel.live https://*.firebaseapp.com https://*.firebase.com https://apis.google.com; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';",
+            value: [
+              "default-src 'self'",
+              // Remove unsafe-eval in production; keep only in dev for HMR / source-maps
+              isProd
+                ? "script-src 'self' https://www.googletagmanager.com https://www.google-analytics.com https://apis.google.com https://vercel.live https://vitals.vercel-insights.com https://va.vercel-scripts.com"
+                : "script-src 'self' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://apis.google.com https://vercel.live https://vitals.vercel-insights.com https://va.vercel-scripts.com",
+              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+              "img-src 'self' data: blob: https:",
+              "font-src 'self' data: https://fonts.gstatic.com",
+              "connect-src 'self' https://api.github.com https://*.github.com https://raw.githubusercontent.com https://codeload.github.com https://api.openai.com https://api.anthropic.com https://api.groq.com https://generativelanguage.googleapis.com https://fonts.gstatic.com https://*.google.com https://*.firebaseio.com https://*.googleapis.com https://*.firebase.com https://*.google-analytics.com https://vercel.live https://vitals.vercel-insights.com https://va.vercel-insights.com wss://*.firebaseio.com",
+              "frame-src 'self' https://vercel.live https://*.firebaseapp.com https://*.firebase.com https://apis.google.com",
+              "worker-src 'self' blob:",
+              "manifest-src 'self'",
+              "frame-ancestors 'none'",
+              "base-uri 'self'",
+              "form-action 'self'",
+            ].join("; "),
           },
           // HSTS - Strict Transport Security
           ...(isProd

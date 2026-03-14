@@ -388,35 +388,23 @@ export class SecurityAnalyzer {
   }
 
   private getFileLanguage(filename: string): SupportedLanguage {
-    // Use the enhanced language detection if available
-    if (this.analysisContext?.detectionResult) {
-      const detectedLang =
-        this.analysisContext.detectionResult.primaryLanguage.name;
-      switch (detectedLang) {
-        case "javascript":
-        case "typescript":
-        case "python":
-        case "java":
-        case "php":
-        case "ruby":
-        case "go":
-        case "csharp":
-          return detectedLang as SupportedLanguage;
-        default:
-          break;
-      }
-    }
-
-    // Fallback to extension-based detection
+    // Use the enhanced language detection if available — but detect per-file
+    // by checking the file's own extension first, then falling back to codebase
+    // primary language. This avoids applying Go rules to a JS file in a Go repo.
     const extension = filename.split(".").pop()?.toLowerCase();
+
+    // Extension-based detection is always the most accurate for per-file language
     switch (extension) {
       case "js":
       case "jsx":
+      case "mjs":
+      case "cjs":
         return "javascript";
       case "ts":
       case "tsx":
         return "typescript";
       case "py":
+      case "pyw":
         return "python";
       case "java":
         return "java";
@@ -428,9 +416,61 @@ export class SecurityAnalyzer {
         return "golang";
       case "cs":
         return "csharp";
+      // Languages without dedicated rule sets — map to closest equivalent
+      case "rs":
+        // Rust: use C-family patterns (memory safety, injection) via golang ruleset
+        return "golang";
+      case "kt":
+      case "kts":
+        // Kotlin: JVM language, use Java rules
+        return "java";
+      case "swift":
+        // Swift: use Java rules (similar OOP patterns, injection risks)
+        return "java";
+      case "scala":
+        // Scala: JVM language, use Java rules
+        return "java";
+      case "cpp":
+      case "cc":
+      case "cxx":
+      case "c":
+      case "h":
+      case "hpp":
+        // C/C++: use golang rules (both are systems languages)
+        return "golang";
       default:
-        return "javascript";
+        break;
     }
+
+    // If extension is ambiguous (e.g. .vue, .svelte), use the codebase primary
+    // language — but only if we can map it correctly to a SupportedLanguage
+    if (this.analysisContext?.detectionResult) {
+      const detectedLang =
+        this.analysisContext.detectionResult.primaryLanguage.name.toLowerCase();
+      // Normalise detection service name variants to SupportedLanguage
+      const langMap: Record<string, SupportedLanguage> = {
+        javascript: "javascript",
+        typescript: "typescript",
+        python: "python",
+        java: "java",
+        php: "php",
+        ruby: "ruby",
+        go: "golang",
+        golang: "golang",
+        csharp: "csharp",
+        "c#": "csharp",
+        rust: "golang",
+        kotlin: "java",
+        swift: "java",
+        scala: "java",
+      };
+      if (langMap[detectedLang]) {
+        return langMap[detectedLang];
+      }
+    }
+
+    // Final fallback: JavaScript (most common, has broadest rule coverage)
+    return "javascript";
   }
 
   private selectAnalysisTool(
@@ -1078,62 +1118,94 @@ export class SecurityAnalyzer {
 
       const lines = content.split("\n");
 
-      for (const rule of rules) {
-        const matches = content.match(rule.pattern);
-        if (matches) {
-          for (const match of matches) {
-            // Find the line number where this match occurs
-            let lineNumber = 1;
-            let characterIndex = 0;
-            for (let i = 0; i < lines.length; i++) {
-              const lineLength = lines[i].length + 1; // +1 for newline
-              if (characterIndex + lineLength > content.indexOf(match)) {
-                lineNumber = i + 1;
-                break;
-              }
-              characterIndex += lineLength;
-            }
+      // Build a cumulative line-start-offset table once per file.
+      // lineStartOffsets[i] = character index where line (i+1) begins.
+      const lineStartOffsets: number[] = [];
+      let cumulative = 0;
+      for (const line of lines) {
+        lineStartOffsets.push(cumulative);
+        cumulative += line.length + 1; // +1 for the '\n'
+      }
 
-            const issue: SecurityIssue = {
-              id: this.generateUniqueId(),
-              line: lineNumber,
-              column: content.indexOf(match) - characterIndex + 1,
-              tool: this.selectAnalysisTool(language, filename),
-              type: rule.type,
-              category: rule.category,
-              message: rule.message,
-              severity: rule.severity,
-              confidence: Math.min(
-                100,
-                Math.max(50, rule.confidence + (match.length % 10) - 5)
-              ),
-              cvssScore: rule.cvssScore || calculateCVSSScore(rule),
-              cweId: rule.cweId,
-              owaspCategory:
-                "owaspCategory" in rule ? rule.owaspCategory : undefined,
-              recommendation: rule.remediation.description,
-              remediation: rule.remediation,
-              filename,
-              codeSnippet: this.extractCodeSnippet(lines, lineNumber),
-              riskRating: this.calculateRiskRating(
-                rule.severity,
-                rule.confidence
-              ),
-              impact: rule.impact,
-              likelihood: rule.likelihood,
-              references: this.generateReferences(
-                rule.cweId,
-                "owaspCategory" in rule ? rule.owaspCategory : undefined
-              ),
-              tags: this.generateTags(rule.category, language),
-            };
-
-            // Generate natural language description
-            issue.naturalLanguageDescription =
-              naturalLanguageDescriptionService.generateDescription(issue);
-
-            issues.push(issue);
+      /**
+       * Given an absolute character offset inside `content`, return
+       * the 1-based line number and 1-based column number.
+       */
+      const offsetToLineCol = (
+        offset: number
+      ): { line: number; column: number } => {
+        // Binary search for the line whose start is <= offset
+        let lo = 0;
+        let hi = lineStartOffsets.length - 1;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (lineStartOffsets[mid] <= offset) {
+            lo = mid;
+          } else {
+            hi = mid - 1;
           }
+        }
+        return {
+          line: lo + 1,
+          column: offset - lineStartOffsets[lo] + 1,
+        };
+      };
+
+      for (const rule of rules) {
+        // Use a global version of the pattern so matchAll works correctly.
+        // Preserve all original flags except 'g' to avoid double-adding.
+        const globalPattern = new RegExp(
+          rule.pattern.source,
+          rule.pattern.flags.includes("g")
+            ? rule.pattern.flags
+            : rule.pattern.flags + "g"
+        );
+
+        for (const match of content.matchAll(globalPattern)) {
+          // match.index is the exact character offset of this occurrence.
+          const matchOffset = match.index ?? 0;
+          const { line: lineNumber, column: colNumber } =
+            offsetToLineCol(matchOffset);
+
+          const issue: SecurityIssue = {
+            id: this.generateUniqueId(),
+            line: lineNumber,
+            column: colNumber,
+            tool: this.selectAnalysisTool(language, filename),
+            type: rule.type,
+            category: rule.category,
+            message: rule.message,
+            severity: rule.severity,
+            confidence: Math.min(
+              100,
+              Math.max(50, rule.confidence + (match[0].length % 10) - 5)
+            ),
+            cvssScore: rule.cvssScore || calculateCVSSScore(rule),
+            cweId: rule.cweId,
+            owaspCategory:
+              "owaspCategory" in rule ? rule.owaspCategory : undefined,
+            recommendation: rule.remediation.description,
+            remediation: rule.remediation,
+            filename,
+            codeSnippet: this.extractCodeSnippet(lines, lineNumber),
+            riskRating: this.calculateRiskRating(
+              rule.severity,
+              rule.confidence
+            ),
+            impact: rule.impact,
+            likelihood: rule.likelihood,
+            references: this.generateReferences(
+              rule.cweId,
+              "owaspCategory" in rule ? rule.owaspCategory : undefined
+            ),
+            tags: this.generateTags(rule.category, language),
+          };
+
+          // Generate natural language description
+          issue.naturalLanguageDescription =
+            naturalLanguageDescriptionService.generateDescription(issue);
+
+          issues.push(issue);
         }
       }
 
@@ -1176,6 +1248,29 @@ export class SecurityAnalyzer {
     const issues: SecurityIssue[] = [];
     const lines = content.split("\n");
 
+    // Build line-start offset table for accurate position reporting
+    const lineStartOffsets: number[] = [];
+    let cumulative = 0;
+    for (const line of lines) {
+      lineStartOffsets.push(cumulative);
+      cumulative += line.length + 1;
+    }
+    const offsetToLineCol = (
+      offset: number
+    ): { line: number; column: number } => {
+      let lo = 0;
+      let hi = lineStartOffsets.length - 1;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (lineStartOffsets[mid] <= offset) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return { line: lo + 1, column: offset - lineStartOffsets[lo] + 1 };
+    };
+
     for (const rule of rules) {
       // Check if rule applies to this file's language/framework
       const language = this.getFileLanguage(filename);
@@ -1183,54 +1278,55 @@ export class SecurityAnalyzer {
         continue;
       }
 
-      // Apply the rule pattern
-      const matches = content.match(new RegExp(rule.pattern.source, "g"));
-      if (matches) {
-        for (const match of matches) {
-          const matchIndex = content.indexOf(match);
-          const lineNumber = content
-            .substring(0, matchIndex)
-            .split("\n").length;
-          const column = matchIndex - content.lastIndexOf("\n", matchIndex - 1);
+      // Use a global pattern so matchAll iterates every occurrence correctly
+      const globalPattern = new RegExp(
+        rule.pattern.source,
+        rule.pattern.flags.includes("g")
+          ? rule.pattern.flags
+          : rule.pattern.flags + "g"
+      );
 
-          const issue: SecurityIssue = {
-            id: this.generateUniqueId(),
-            line: lineNumber,
-            column: Math.max(1, column),
-            tool: this.getFrameworkSpecificTool(rule),
-            type: rule.name,
-            category: rule.category,
-            message: rule.description,
-            severity: rule.severity,
-            confidence: 85,
-            filename: filename,
-            codeSnippet: this.extractCodeSnippet(lines, lineNumber),
-            recommendation: rule.remediation.description,
-            remediation: {
-              description: rule.remediation.description,
-              codeExample: rule.remediation.example,
-              fixExample: rule.remediation.example,
-              effort: this.getEffortLevel(rule.severity),
-              priority: this.getPriorityLevel(rule.severity),
-            },
-            riskRating: rule.severity,
-            impact: this.getFrameworkRuleImpact(rule.severity),
-            likelihood: "Medium",
-            references: [
-              `Framework: ${rule.frameworks?.join(", ") || "Generic"}`,
-            ],
-            tags: [
-              `framework-specific`,
-              rule.category.toLowerCase().replace(/\s+/g, "-"),
-            ],
-          };
+      for (const match of content.matchAll(globalPattern)) {
+        const matchOffset = match.index ?? 0;
+        const { line: lineNumber, column } = offsetToLineCol(matchOffset);
 
-          // Generate natural language description
-          issue.naturalLanguageDescription =
-            naturalLanguageDescriptionService.generateDescription(issue);
+        const issue: SecurityIssue = {
+          id: this.generateUniqueId(),
+          line: lineNumber,
+          column: Math.max(1, column),
+          tool: this.getFrameworkSpecificTool(rule),
+          type: rule.name,
+          category: rule.category,
+          message: rule.description,
+          severity: rule.severity,
+          confidence: 85,
+          filename: filename,
+          codeSnippet: this.extractCodeSnippet(lines, lineNumber),
+          recommendation: rule.remediation.description,
+          remediation: {
+            description: rule.remediation.description,
+            codeExample: rule.remediation.example,
+            fixExample: rule.remediation.example,
+            effort: this.getEffortLevel(rule.severity),
+            priority: this.getPriorityLevel(rule.severity),
+          },
+          riskRating: rule.severity,
+          impact: this.getFrameworkRuleImpact(rule.severity),
+          likelihood: "Medium",
+          references: [
+            `Framework: ${rule.frameworks?.join(", ") || "Generic"}`,
+          ],
+          tags: [
+            `framework-specific`,
+            rule.category.toLowerCase().replace(/\s+/g, "-"),
+          ],
+        };
 
-          issues.push(issue);
-        }
+        // Generate natural language description
+        issue.naturalLanguageDescription =
+          naturalLanguageDescriptionService.generateDescription(issue);
+
+        issues.push(issue);
       }
     }
 

@@ -1,11 +1,12 @@
 // Application constants
+import { APP_VERSION } from "@/utils/version";
 
 export const APP_CONFIG = {
   name: "Code Guardian Report",
-  version: "9.0.0",
+  version: APP_VERSION,
   description: "Next-Generation AI-Powered Security Analysis Platform",
   author: "Code Guardian Team",
-  repository: "https://github.com/your-org/code-guardian-report",
+  repository: "https://github.com/Sakshamjain98/code-guardian-report",
 } as const;
 
 export const API_ENDPOINTS = {
